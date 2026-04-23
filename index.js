@@ -1,12 +1,13 @@
 const axios = require('axios');
 
 // ==========================================
-// CONFIGURATION
+// CONFIGURATION (Pulled from Railway Variables)
 // ==========================================
-// This checks if you used a Variable (process.env) or the Array below
-const TOKENS = process.env.TOKENS ? process.env.TOKENS.split(',') : ["YOUR_TOKEN_HERE"]; 
-const CHANNEL_ID = "YOUR_CHANNEL_ID_HERE"; 
-const INTERVAL_SECONDS = 60; 
+const TOKENS = process.env.TOKENS ? process.env.TOKENS.split(',') : []; 
+const CHANNEL_ID = process.env.CHANNEL_ID; 
+
+const GAP_BETWEEN_ACCOUNTS = 10; // 10 seconds between each account
+const RESTART_WAIT_SECONDS = 10; // 10 seconds before starting the whole list again
 
 const MESSAGES = [
     "cant win any gws lol", "cant level up lol", "so close to next level", "need more gems man", "the grind is real 💀",
@@ -55,77 +56,60 @@ const MESSAGES = [
     "no win again lol", "level up now lol"
 ];
 
-// --- INITIAL STARTUP LOG ---
-console.log("-----------------------------------------");
+// --- STARTUP CHECKS ---
 console.log(`[SYSTEM] Startup at ${new Date().toLocaleString()}`);
-if (!TOKENS || TOKENS[0] === "YOUR_TOKEN_HERE" || TOKENS[0] === "") {
-    console.error("[CRITICAL ERROR] No tokens found! Please add them to your TOKENS variable.");
-} else {
-    console.log(`[SYSTEM] Loaded ${TOKENS.length} tokens.`);
-}
-console.log(`[SYSTEM] Targeting Channel ID: ${CHANNEL_ID}`);
-console.log("-----------------------------------------");
+if (TOKENS.length === 0) console.error("[ERROR] TOKENS variable is missing in Railway!");
+if (!CHANNEL_ID) console.error("[ERROR] CHANNEL_ID variable is missing in Railway!");
 
-async function startGrind() {
-    const msg = MESSAGES[Math.floor(Math.random() * MESSAGES.length)];
-    console.log(`[TIMER] Starting message rotation...`);
-
+// --- ROTATION SYSTEM ---
+async function runRotation() {
+    console.log(`[CYCLE] Starting rotation for ${TOKENS.length} accounts...`);
+    
     for (let i = 0; i < TOKENS.length; i++) {
         const token = TOKENS[i];
+        const msg = MESSAGES[Math.floor(Math.random() * MESSAGES.length)];
+
         try {
             await axios.post(`https://discord.com/api/v10/channels/${CHANNEL_ID}/messages`, 
                 { content: msg }, 
                 { headers: { Authorization: token } }
             );
-            console.log(`[SUCCESS] Account ${i+1} sent: "${msg}"`);
-            // Stagger accounts by 3 seconds
-            await new Promise(r => setTimeout(r, 3000));
+            console.log(`[SUCCESS] Account ${i+1}/${TOKENS.length} sent: "${msg}"`);
         } catch (e) {
-            const status = e.response?.status;
-            if (status === 401) console.error(`[ERROR] Account ${i+1}: Token is INVALID/EXPIRED.`);
-            else if (status === 403) console.error(`[ERROR] Account ${i+1}: No permission for this channel.`);
-            else if (status === 429) console.error(`[ERROR] Account ${i+1}: Rate limited by Discord.`);
-            else console.error(`[ERROR] Account ${i+1}: ${e.message}`);
+            console.error(`[ERROR] Account ${i+1} failed: ${e.response?.status || e.message}`);
+        }
+
+        // Wait 10s between accounts
+        if (i < TOKENS.length - 1) {
+            console.log(`[WAIT] Next account in ${GAP_BETWEEN_ACCOUNTS}s...`);
+            await new Promise(r => setTimeout(r, GAP_BETWEEN_ACCOUNTS * 1000));
         }
     }
+
+    console.log(`[FINISHED] Cycle complete. Restarting in ${RESTART_WAIT_SECONDS}s...`);
+    setTimeout(runRotation, RESTART_WAIT_SECONDS * 1000);
 }
 
+// Auto-Reaction (runs independently every 10s)
 async function checkAndReact() {
-    // Only use the first token to "look" at the channel to save rate limits
+    if (TOKENS.length === 0) return;
     try {
         const res = await axios.get(`https://discord.com/api/v10/channels/${CHANNEL_ID}/messages?limit=1`, {
             headers: { Authorization: TOKENS[0] }
         });
         const lastMsg = res.data[0];
-
         if (lastMsg && lastMsg.reactions) {
-            console.log(`[REACTION] Found reactions on latest message. Syncing...`);
-            for (const reaction of lastMsg.reactions) {
-                const emoji = reaction.emoji.id ? `${reaction.emoji.name}:${reaction.emoji.id}` : reaction.emoji.name;
-                
+            for (const r of lastMsg.reactions) {
+                const emoji = r.emoji.id ? `${r.emoji.name}:${r.emoji.id}` : r.emoji.name;
                 for (let i = 0; i < TOKENS.length; i++) {
-                    const token = TOKENS[i];
-                    await new Promise(r => setTimeout(r, Math.floor(Math.random() * 2000) + 1000));
-                    await axios.put(
-                        `https://discord.com/api/v10/channels/${CHANNEL_ID}/messages/${lastMsg.id}/reactions/${encodeURIComponent(emoji)}/@me`,
-                        {},
-                        { headers: { Authorization: token } }
-                    ).then(() => {
-                        console.log(`[SUCCESS] Account ${i+1} added reaction: ${emoji}`);
-                    }).catch((err) => {
-                        // Silent catch if already reacted
-                    });
+                    await new Promise(res => setTimeout(res, Math.random() * 2000 + 1000));
+                    await axios.put(`https://discord.com/api/v10/channels/${CHANNEL_ID}/messages/${lastMsg.id}/reactions/${encodeURIComponent(emoji)}/@me`, {}, { headers: { Authorization: TOKENS[i] } }).catch(()=>{});
                 }
             }
         }
-    } catch (e) {
-        // Log errors if the bot can't even see the channel
-        if (e.response?.status === 403) console.error("[ERROR] Reaction check failed: Account can't see this channel.");
-    }
+    } catch (e) {}
 }
 
-// Set up the loops
-setInterval(startGrind, INTERVAL_SECONDS * 1000);
-setInterval(checkAndReact, 10000); // Check for reactions every 10 seconds
-
-console.log("[SYSTEM] Background loops are active.");
+// Start everything
+runRotation();
+setInterval(checkAndReact, 10000);
